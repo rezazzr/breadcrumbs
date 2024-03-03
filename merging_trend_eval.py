@@ -1,5 +1,6 @@
 import argparse
 from itertools import combinations
+from typing import Optional, Dict
 
 import torch
 import wandb
@@ -13,6 +14,7 @@ from src.task_vectors import (
     TaskVectorTopKKeep,
     TaskVectorMiddleKeep,
     TaskVectorRandomMask,
+    TiesMerge,
 )
 
 zeroshot_acc = {
@@ -98,6 +100,7 @@ def main(args: argparse.Namespace):
         },
     )
     # build and load all the needed task vectors at once
+    task_vectors_dict = None
     if args.run_name == "paper_implementation":
         task_vectors_dict = {
             dataset: TaskVector(
@@ -152,6 +155,8 @@ def main(args: argparse.Namespace):
             )
             for dataset in args.data_sets
         }
+    elif args.run_name == "ties":
+        print("\U000026BD\U000026BD\U000026BD Initializing TIES merging.")
     else:
         raise ValueError("Unsupported method of task vectors.")
 
@@ -169,10 +174,20 @@ def main(args: argparse.Namespace):
             if len(data_subsets) == 0:
                 data_subsets = args.data_sets
                 alpha = 0
-
-            task_vectors = [task_vectors_dict[dataset] for dataset in data_subsets]
-            task_vector_sum = sum(task_vectors)
-            image_encoder = task_vector_sum.apply_to(args.pretrained_checkpoint, scaling_coef=alpha)
+            if args.run_name != "ties":
+                assert task_vectors_dict is not None, "Was not able to populate the variable: task_vectors_dict"
+                task_vectors = [task_vectors_dict[dataset] for dataset in data_subsets]
+                task_vector_sum = sum(task_vectors)
+                image_encoder = task_vector_sum.apply_to(args.pretrained_checkpoint, scaling_coef=alpha)
+            else:
+                ties_obj = TiesMerge(
+                    pretrained_checkpoint=args.pretrained_checkpoint,
+                    list_finetuned_checkpoints=[
+                        f"{args.checkpoint_path}/{args.model}/{dataset}/finetuned.pt" for dataset in data_subsets
+                    ],
+                    top_k_keep=args.beta,
+                )
+                image_encoder = ties_obj.apply_to_pretrained(alpha=alpha)
 
             if not args.eval_on_imagenet_only:
                 evaluation_dataset = data_subsets if args.eval_on_partial_datasets else args.data_sets
@@ -277,7 +292,7 @@ if __name__ == "__main__":
         help="Optional name for the run.",
         type=str,
         default="paper_implementation",
-        choices=["paper_implementation", "topk_zero", "topk_init", "topk_keep", "middle_keep", "random"],
+        choices=["paper_implementation", "topk_zero", "topk_init", "topk_keep", "middle_keep", "random", "ties"],
     )
     parser.add_argument(
         "--checkpoint_path",
