@@ -2,13 +2,14 @@ import argparse
 from itertools import combinations
 from typing import List
 
+import ray
 import torch
 from ray import air, tune
 from ray.air import session
 from ray.air.integrations.wandb import WandbLoggerCallback
 from ray.tune.schedulers import ASHAScheduler
-from ray.tune.search.bayesopt import BayesOptSearch
 from ray.tune.search import ConcurrencyLimiter
+from ray.tune.search.bayesopt import BayesOptSearch
 
 from src.eval import eval_single_dataset
 from src.task_vectors import (
@@ -18,6 +19,7 @@ from src.task_vectors import (
     TaskVectorTopKKeep,
     TaskVectorMiddleKeep,
     TaskVectorRandomMask,
+    TiesMerge,
 )
 
 zeroshot_acc = {
@@ -92,6 +94,7 @@ def evaluate_all_datasets(data_sets: List[str], image_encoder: torch.nn.Module) 
         results = eval_single_dataset(image_encoder, dataset, args)["top1"] * 100.0
         normalized_acc = (results / finetuned_acc[args.model][dataset]) * 100.0
         average_normalized_acc += normalized_acc
+        print(f"\U0001F692\U0001F692\U0001F692 Dataset: {dataset} \U000027A1 Acc: {normalized_acc}")
     return average_normalized_acc / len(data_sets)
 
 
@@ -149,14 +152,26 @@ def evaluate_on_task_subsets(config, args: argparse.Namespace):
             )
             for dataset in args.data_sets
         }
+    elif args.method == "ties":
+        print("\U000026BD\U000026BD\U000026BD Initializing TIES merging.")
     else:
         raise ValueError("Unsupported method of task vectors.")
 
     global_normalized_acc = 0.0
     for index, data_subsets in enumerate(combinations(args.data_sets, args.evaluation_depth)):
-        task_vectors = [task_vectors_dict[dataset] for dataset in data_subsets]
-        task_vector_sum = sum(task_vectors)
-        image_encoder = task_vector_sum.apply_to(args.pretrained_checkpoint, scaling_coef=config["alpha"])
+        if args.method != "ties":
+            task_vectors = [task_vectors_dict[dataset] for dataset in data_subsets]
+            task_vector_sum = sum(task_vectors)
+            image_encoder = task_vector_sum.apply_to(args.pretrained_checkpoint, scaling_coef=config["alpha"])
+        else:
+            ties_obj = TiesMerge(
+                pretrained_checkpoint=args.pretrained_checkpoint,
+                list_finetuned_checkpoints=[
+                    f"{args.checkpoint_path}/{args.model}/{dataset}/finetuned.pt" for dataset in data_subsets
+                ],
+                top_k_keep=config["beta"],
+            )
+            image_encoder = ties_obj.apply_to_pretrained(alpha=config["alpha"])
 
         if args.eval_on_partial_datasets:
             avg_normalized_acc = evaluate_all_datasets(data_sets=data_subsets, image_encoder=image_encoder)
@@ -201,10 +216,23 @@ def main(args: argparse.Namespace):
         }
         points_to_evaluate = [{"alpha": 0.2, "beta": 0.15}]
         num_samples = 40
+    elif args.method == "ties":
+        space = {
+            "alpha": tune.uniform(0.01, 1),
+            "beta": tune.uniform(0.01, 0.25),
+        }
+        points_to_evaluate = [
+            {"alpha": 1, "beta": 0.15},
+            {"alpha": 1, "beta": 0.10},
+            {"alpha": 0.8, "beta": 0.10},
+            {"alpha": 1, "beta": 0.20},
+        ]
+        num_samples = 40
+
     elif args.method == "middle_keep":
         space = {
-            "alpha": tune.uniform(0.1, 1),
-            "beta": tune.uniform(0.05, 0.4),
+            "alpha": tune.uniform(0.01, 1),
+            "beta": tune.uniform(0.05, 0.20),
             "gamma": tune.uniform(0.001, 0.01),
         }
         points_to_evaluate = [{"alpha": 0.2, "beta": 0.15, "gamma": 0.006}]
@@ -227,12 +255,20 @@ def main(args: argparse.Namespace):
         points_to_evaluate=points_to_evaluate,
         random_search_steps=6,
         skip_duplicate=True,
+        utility_kwargs={
+            "kappa": 5
+        },  # needs to be adjusted based on how much exploration we need to do. Higher means more explorations.
     )
-    algo = ConcurrencyLimiter(algo, max_concurrent=2)
+    algo = ConcurrencyLimiter(
+        algo, max_concurrent=6
+    )  # max_concurrent: needs to be adjusted based on the number of gpus
     project_name = "parameter_search_partial" if args.eval_on_partial_datasets else "parameter_search_full_dataset"
     wandb_config = {"model": args.model, "method": args.method, "evaluation_depth": args.evaluation_depth}
+    ray.init(
+        _temp_dir="/dev/shm/ray"
+    )  # needs to be set to this address to run on linux. It possibly would need to changed for other os
     tuner = tune.Tuner(
-        tune.with_resources(tune.with_parameters(evaluate_on_task_subsets, args=args), {"gpu": 0.5}),
+        tune.with_resources(tune.with_parameters(evaluate_on_task_subsets, args=args), {"gpu": 0.5, "cpu": 9}),
         param_space=space,
         tune_config=tune.TuneConfig(num_samples=num_samples, scheduler=asha_scheduler, search_alg=algo),
         run_config=air.RunConfig(callbacks=[WandbLoggerCallback(project=project_name, config=wandb_config)]),
@@ -253,7 +289,7 @@ if __name__ == "__main__":
         help="Optional name for the run.",
         type=str,
         default="paper_implementation",
-        choices=["paper_implementation", "topk_zero", "topk_init", "topk_keep", "middle_keep", "random"],
+        choices=["paper_implementation", "topk_zero", "topk_init", "topk_keep", "middle_keep", "random", "ties"],
     )
     parser.add_argument(
         "--checkpoint_path",
