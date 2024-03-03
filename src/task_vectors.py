@@ -211,6 +211,7 @@ class TaskVectorRandomMask(TaskVectorABC):
 class TiesMerge:
     def __init__(self, pretrained_checkpoint: str, list_finetuned_checkpoints: List[str], top_k_keep: float = 0.2):
         self.top_k_keep = top_k_keep
+        self.path_pretrained_checkpoint = pretrained_checkpoint
         # load the models
         assert pretrained_checkpoint is not None and len(list_finetuned_checkpoints) > 0
         with torch.no_grad():
@@ -252,12 +253,14 @@ class TiesMerge:
                 flat_task_vectors=flat_task_vectors, top_k_keep=self.top_k_keep
             )
 
-    def apply_to_pretrained(self, alpha: float = 1):
+    def apply_to_pretrained(self, alpha: float = 1) -> torch.nn.Module:
         flat_integration: torch.Tensor = self.flat_pretrained + alpha * self.flat_merged_task_vectors
         merged_state_dict = TiesMerge.vector_to_state_dict(
             vector=flat_integration, state_dict=self.pretrained_state_dict
         )
-        return merged_state_dict
+        pretrained_model: torch.nn.Module = torch.load(self.path_pretrained_checkpoint)
+        pretrained_model.load_state_dict(merged_state_dict, strict=False)
+        return pretrained_model
 
     @staticmethod
     def state_dict_to_vector(state_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
