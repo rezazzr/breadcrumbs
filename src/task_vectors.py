@@ -13,9 +13,9 @@ from src.utils import safe_load_state_dict
 class TaskVectorABC(ABC):
     def __init__(
         self,
-        pretrained_checkpoint=Optional[str],
-        finetuned_checkpoint=Optional[str],
-        vector=Optional[Dict[str, torch.Tensor]],
+        pretrained_checkpoint: Optional[str] = None,
+        finetuned_checkpoint: Optional[str] = None,
+        vector: Optional[Dict[str, torch.Tensor]] = None,
     ):
         """Initializes the task vector from a pretrained and a finetuned checkpoints.
 
@@ -77,7 +77,10 @@ class TaskVectorABC(ABC):
 
 class TaskVector(TaskVectorABC):
     def __init__(
-        self, pretrained_checkpoint=Optional[str], finetuned_checkpoint=Optional[str], vector=Dict[str, torch.Tensor]
+        self,
+        pretrained_checkpoint: Optional[str] = None,
+        finetuned_checkpoint: Optional[str] = None,
+        vector: Optional[Dict[str, torch.Tensor]] = None,
     ):
         super().__init__(pretrained_checkpoint, finetuned_checkpoint, vector)
 
