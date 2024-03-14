@@ -10,6 +10,7 @@ from ray.air.integrations.wandb import WandbLoggerCallback
 from ray.tune.schedulers import ASHAScheduler
 from ray.tune.search import ConcurrencyLimiter
 from ray.tune.search.bayesopt import BayesOptSearch
+import numpy as np
 
 from src.eval import eval_single_dataset
 from src.task_vectors import (
@@ -217,17 +218,21 @@ def main(args: argparse.Namespace):
         points_to_evaluate = [{"alpha": 0.2, "beta": 0.15}]
         num_samples = 40
     elif args.method == "ties":
+        # space = {
+        #     "alpha": tune.uniform(0.01, 1),
+        #     "beta": tune.uniform(0.01, 0.25),
+        # }
+        # points_to_evaluate = [
+        #     {"alpha": 1, "beta": 0.15},
+        #     {"alpha": 1, "beta": 0.10},
+        #     {"alpha": 0.8, "beta": 0.10},
+        #     {"alpha": 1, "beta": 0.20},
+        # ]
+        # num_samples = 40
         space = {
-            "alpha": tune.uniform(0.01, 1),
-            "beta": tune.uniform(0.01, 0.25),
+            "alpha": tune.grid_search(list(np.array(range(1, 11)) / 10)),
+            "beta": tune.grid_search(list(np.array(range(5, 45, 5)) / 100)),
         }
-        points_to_evaluate = [
-            {"alpha": 1, "beta": 0.15},
-            {"alpha": 1, "beta": 0.10},
-            {"alpha": 0.8, "beta": 0.10},
-            {"alpha": 1, "beta": 0.20},
-        ]
-        num_samples = 40
 
     elif args.method == "middle_keep":
         space = {
@@ -240,28 +245,28 @@ def main(args: argparse.Namespace):
     else:
         raise ValueError("Unsupported method of task vectors.")
 
-    asha_scheduler = ASHAScheduler(
-        time_attr="training_iteration",
-        metric="global_normalized_acc",
-        mode="max",
-        max_t=20 if args.eval_on_partial_datasets else 10,
-        grace_period=1,
-        reduction_factor=8,
-        brackets=1,
-    )
-    algo = BayesOptSearch(
-        metric="global_normalized_acc",
-        mode="max",
-        points_to_evaluate=points_to_evaluate,
-        random_search_steps=6,
-        skip_duplicate=True,
-        utility_kwargs={
-            "kappa": 5
-        },  # needs to be adjusted based on how much exploration we need to do. Higher means more explorations.
-    )
-    algo = ConcurrencyLimiter(
-        algo, max_concurrent=6
-    )  # max_concurrent: needs to be adjusted based on the number of gpus
+    # asha_scheduler = ASHAScheduler(
+    #     time_attr="training_iteration",
+    #     metric="global_normalized_acc",
+    #     mode="max",
+    #     max_t=20 if args.eval_on_partial_datasets else 10,
+    #     grace_period=1,
+    #     reduction_factor=8,
+    #     brackets=1,
+    # )
+    # algo = BayesOptSearch(
+    #     metric="global_normalized_acc",
+    #     mode="max",
+    #     points_to_evaluate=points_to_evaluate,
+    #     random_search_steps=6,
+    #     skip_duplicate=True,
+    #     utility_kwargs={
+    #         "kappa": 5
+    #     },  # needs to be adjusted based on how much exploration we need to do. Higher means more explorations.
+    # )
+    # algo = ConcurrencyLimiter(
+    #     algo, max_concurrent=6
+    # )  # max_concurrent: needs to be adjusted based on the number of gpus
     project_name = "parameter_search_partial" if args.eval_on_partial_datasets else "parameter_search_full_dataset"
     wandb_config = {"model": args.model, "method": args.method, "evaluation_depth": args.evaluation_depth}
     ray.init(
@@ -270,8 +275,12 @@ def main(args: argparse.Namespace):
     tuner = tune.Tuner(
         tune.with_resources(tune.with_parameters(evaluate_on_task_subsets, args=args), {"gpu": 0.5, "cpu": 9}),
         param_space=space,
-        tune_config=tune.TuneConfig(num_samples=num_samples, scheduler=asha_scheduler, search_alg=algo),
-        run_config=air.RunConfig(callbacks=[WandbLoggerCallback(project=project_name, config=wandb_config)]),
+        # tune_config=tune.TuneConfig(num_samples=num_samples, scheduler=asha_scheduler, search_alg=algo),
+        tune_config=tune.TuneConfig(max_concurrent_trials=2),
+        run_config=air.RunConfig(
+            callbacks=[WandbLoggerCallback(project=project_name, config=wandb_config)],
+            failure_config=ray.train.FailureConfig(max_failures=30),
+        ),
     )
     tuner.fit()
 
